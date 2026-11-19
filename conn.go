@@ -2,6 +2,8 @@ package grpc_net_conn
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -17,9 +19,11 @@ import (
 // limitations of visibility given by the gRPC stream. Deadlines do not work.
 // Use keepalive to detect a dead stream instead.
 //
-// The connection ends when a Read or Write fails or Close is called. Done and
-// Err report when and why it ended. Reads and writes after that return the
-// same error.
+// The connection ends when a Read fails, a Write fails with an error other
+// than io.EOF, or Close is called. A Write gets io.EOF when a client stream
+// has ended, and a Read then returns the unread data and the actual error.
+// Done and Err report when and why the connection ended. Reads and writes
+// after that return the same error.
 //
 // As documented on net.Conn, it is safe for concurrent read/write.
 type Conn struct {
@@ -164,7 +168,12 @@ func (c *Conn) Write(p []byte) (int, error) {
 			c.ResponseLock.Unlock()
 		}
 		if err != nil {
-			c.finish(err)
+			// A client stream returns io.EOF when the stream has ended for
+			// another reason. Unread messages and the actual status are still
+			// available from RecvMsg, so let Read end the connection.
+			if !errors.Is(err, io.EOF) {
+				c.finish(err)
+			}
 			return 0, err
 		}
 
@@ -204,8 +213,8 @@ func (c *Conn) Close() error {
 	return nil
 }
 
-// Done returns a channel that is closed when the connection ends because
-// a Read or Write failed or Close was called.
+// Done returns a channel that is closed when the connection ends. See Conn
+// for when that happens.
 func (c *Conn) Done() <-chan struct{} {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/unlabs-dev/go-grpc-net-conn/testproto"
 )
@@ -195,4 +197,36 @@ func (s *closingServer) Stream(stream testproto.TestService_StreamServer) error 
 	s.conns <- conn
 	<-conn.Done()
 	return nil
+}
+
+func TestConn_readsAfterClientWriteEOF(t *testing.T) {
+	conn := testStreamConn(testStreamClient(t, &failingServer{}))
+
+	// SendMsg on a client stream returns io.EOF once the server has ended the stream.
+	var writeErr error
+	require.Eventually(t, func() bool {
+		_, writeErr = conn.Write([]byte("ping"))
+		return writeErr != nil
+	}, 5*time.Second, 10*time.Millisecond)
+	require.ErrorIs(t, writeErr, io.EOF)
+
+	// The data sent before the server ended the stream and its final status are still readable.
+	data := make([]byte, 1024)
+	n, err := conn.Read(data)
+	require.NoError(t, err)
+	require.Equal(t, "hello", string(data[:n]))
+
+	_, err = conn.Read(data)
+	require.Equal(t, codes.PermissionDenied, status.Code(err), err)
+	require.Equal(t, codes.PermissionDenied, status.Code(conn.Err()), conn.Err())
+}
+
+// failingServer sends data and ends the stream with an error without reading anything.
+type failingServer struct{}
+
+func (s *failingServer) Stream(stream testproto.TestService_StreamServer) error {
+	if _, err := testStreamConn(stream).Write([]byte("hello")); err != nil {
+		return err
+	}
+	return status.Error(codes.PermissionDenied, "denied")
 }
