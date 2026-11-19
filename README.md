@@ -1,4 +1,4 @@
-# go-grpc-net-conn [![Godoc](https://godoc.org/github.com/mitchellh/go-grpc-net-conn?status.svg)](https://godoc.org/github.com/mitchellh/go-grpc-net-conn)
+# go-grpc-net-conn [![Godoc](https://godoc.org/github.com/unlabs-dev/go-grpc-net-conn?status.svg)](https://godoc.org/github.com/unlabs-dev/go-grpc-net-conn)
 
 go-grpc-net-conn is a Go library that creates a `net.Conn` implementation
 on top of gRPC streams. If the stream is bidirectional (both the request and
@@ -10,12 +10,12 @@ response of an RPC is a stream) then the `net.Conn` is a
 Standard `go get`:
 
 ```
-$ go get github.com/mitchellh/go-grpc-net-conn
+$ go get github.com/unlabs-dev/go-grpc-net-conn
 ```
 
 ## Usage & Example
 
-For usage and examples see the [Godoc](http://godoc.org/github.com/mitchellh/go-grpc-net-conn).
+For usage and examples see the [Godoc](http://godoc.org/github.com/unlabs-dev/go-grpc-net-conn).
 
 A brief example is shown below. Note that the only minor complexity is
 populating the required fields for the `Conn` structure. This package needs
