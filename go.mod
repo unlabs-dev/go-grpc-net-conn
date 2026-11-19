@@ -1,10 +1,10 @@
 module github.com/unlabs-dev/go-grpc-net-conn
 
-go 1.27.0
+go 1.26.0
 
 require (
 	github.com/stretchr/testify v1.12.1
-	google.golang.org/grpc v1.85.0
+	google.golang.org/grpc v1.79.3
 	google.golang.org/protobuf v1.36.12
 )
 
