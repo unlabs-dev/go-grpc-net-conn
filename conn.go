@@ -1,20 +1,25 @@
 package grpc_net_conn
 
 import (
+	"context"
 	"net"
 	"sync"
 	"time"
 
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 )
 
 // Conn implements net.Conn across a gRPC stream. You must populate many
 // of the exported structs on this field so please read the documentation.
 //
 // There are a number of limitations to this implementation, typically due
-// limitations of visibility given by the gRPC stream. Methods such as
-// LocalAddr, RemoteAddr, deadlines, etc. do not work.
+// limitations of visibility given by the gRPC stream. Deadlines do not work.
+// Use keepalive to detect a dead stream instead.
+//
+// The connection ends when a Read or Write fails or Close is called. Done and
+// Err report when and why it ended. Reads and writes after that return the
+// same error.
 //
 // As documented on net.Conn, it is safe for concurrent read/write.
 type Conn struct {
@@ -51,6 +56,28 @@ type Conn struct {
 	// Decoder for more information.
 	Decode Decoder
 
+	// Cancel cancels the context of a client stream, the only way to abort it.
+	// Close calls it to end the stream and unblock a pending Read. If it's nil,
+	// Close only half-closes a client stream with CloseSend, so a pending Read
+	// waits for the other side to end the stream.
+	// Leave it nil for a server stream, which ends when its handler returns.
+	// And the server handler should return once Done is closed.
+	Cancel context.CancelFunc
+
+	// Local and Remote network addresses of the connection. These are not available
+	// from a gRPC stream so you must set them if you want to use them. They
+	// LocalAddr and RemoteAddr return these values if set, otherwise they return
+	// a default Addr.
+	Local, Remote net.Addr
+
+	// mu protects done and err.
+	mu sync.Mutex
+	// done is closed when the connection ends. It's created lazily so that
+	// a Conn can be used without a constructor.
+	done chan struct{}
+	// err is the reason the connection ended. It's nil while it's open.
+	err error
+
 	// readOffset tracks where we've read up to if we're reading a result
 	// that didn't fully fit into the target slice. See Read.
 	readOffset int
@@ -66,10 +93,15 @@ func (c *Conn) Read(p []byte) (int, error) {
 	c.readLock.Lock()
 	defer c.readLock.Unlock()
 
+	if err := c.Err(); err != nil {
+		return 0, err
+	}
+
 	// Attempt to read a value only if we're not still decoding a
 	// partial read value from the last result.
 	if c.readOffset == 0 {
 		if err := c.Stream.RecvMsg(c.Response); err != nil {
+			c.finish(err)
 			return 0, err
 		}
 	}
@@ -90,6 +122,10 @@ func (c *Conn) Read(p []byte) (int, error) {
 		// don't potentially store a large response structure in memory.
 		proto.Reset(c.Response)
 
+		// A message that can't be decoded leaves the stream in an unknown state.
+		if err != nil {
+			c.finish(err)
+		}
 		return n, err
 	}
 
@@ -104,11 +140,16 @@ func (c *Conn) Write(p []byte) (int, error) {
 	c.writeLock.Lock()
 	defer c.writeLock.Unlock()
 
+	if err := c.Err(); err != nil {
+		return 0, err
+	}
+
 	total := len(p)
 	for {
 		// Encode our data into the request. Any error means we abort.
 		n, err := c.Encode(c.Request, p)
 		if err != nil {
+			c.finish(err)
 			return 0, err
 		}
 
@@ -123,6 +164,7 @@ func (c *Conn) Write(p []byte) (int, error) {
 			c.ResponseLock.Unlock()
 		}
 		if err != nil {
+			c.finish(err)
 			return 0, err
 		}
 
@@ -137,13 +179,20 @@ func (c *Conn) Write(p []byte) (int, error) {
 	}
 }
 
-// Close will close the client if this is a client. If this is a server
-// stream this does nothing since gRPC expects you to close the stream by
-// returning from the RPC call.
+// Close ends the connection and closes Done. Reads and writes after that
+// return net.ErrClosed.
 //
-// This calls CloseSend underneath for clients, so read the documentation
-// for that to understand the semantics of this call.
+// If Cancel is set, Close calls it to end the stream. Otherwise, it calls
+// CloseSend on a client stream, so read the documentation for that to
+// understand the semantics of this call. A server stream ends only when the
+// RPC handler returns, so the handler should return once Done is closed.
 func (c *Conn) Close() error {
+	c.finish(net.ErrClosed)
+
+	if c.Cancel != nil {
+		c.Cancel()
+		return nil
+	}
 	if cs, ok := c.Stream.(grpc.ClientStream); ok {
 		// We have to acquire the write lock since the gRPC docs state:
 		// "It is also not safe to call CloseSend concurrently with SendMsg."
@@ -155,11 +204,59 @@ func (c *Conn) Close() error {
 	return nil
 }
 
-// LocalAddr returns nil.
-func (c *Conn) LocalAddr() net.Addr { return nil }
+// Done returns a channel that is closed when the connection ends because
+// a Read or Write failed or Close was called.
+func (c *Conn) Done() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-// RemoteAddr returns nil.
-func (c *Conn) RemoteAddr() net.Addr { return nil }
+	if c.done == nil {
+		c.done = make(chan struct{})
+	}
+	return c.done
+}
+
+// Err returns the reason the connection ended or nil if it's still open.
+// It's io.EOF if the other side ended the stream normally and net.ErrClosed
+// if Close was called.
+func (c *Conn) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.err
+}
+
+// finish ends the connection with err unless it has already ended.
+func (c *Conn) finish(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.err != nil {
+		return
+	}
+	c.err = err
+
+	if c.done == nil {
+		c.done = make(chan struct{})
+	}
+	close(c.done)
+}
+
+// LocalAddr returns Local or an Addr if it's nil.
+func (c *Conn) LocalAddr() net.Addr {
+	if c.Local != nil {
+		return c.Local
+	}
+	return Addr{}
+}
+
+// RemoteAddr returns Remote or an Addr if it's nil.
+func (c *Conn) RemoteAddr() net.Addr {
+	if c.Remote != nil {
+		return c.Remote
+	}
+	return Addr{}
+}
 
 // SetDeadline is non-functional due to limitations on how gRPC works.
 // You can mimic deadlines often using call options.
@@ -172,3 +269,13 @@ func (c *Conn) SetReadDeadline(time.Time) error { return nil }
 func (c *Conn) SetWriteDeadline(time.Time) error { return nil }
 
 var _ net.Conn = (*Conn)(nil)
+
+// Addr is the default address of both ends of a Conn. A gRPC stream doesn't
+// expose the addresses of the underlying connection.
+type Addr struct{}
+
+// Network returns "grpc-stream".
+func (Addr) Network() string { return "grpc-stream" }
+
+// String returns "grpc-stream".
+func (Addr) String() string { return "grpc-stream" }

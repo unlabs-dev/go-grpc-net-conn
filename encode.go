@@ -28,10 +28,9 @@ type Decoder func(m proto.Message, offset int, p []byte) ([]byte, error)
 //
 // Example: given a structure that has a field "Data []byte", you could:
 //
-//     SimpleEncoder(func(msg proto.Message) *[]byte {
-//         return &msg.(*MyStruct).Data
-//     })
-//
+//	SimpleEncoder(func(msg proto.Message) *[]byte {
+//	    return &msg.(*MyStruct).Data
+//	})
 func SimpleEncoder(f func(proto.Message) *[]byte) Encoder {
 	return func(msg proto.Message, p []byte) (int, error) {
 		bytePtr := f(msg)

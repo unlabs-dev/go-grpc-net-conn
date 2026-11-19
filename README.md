@@ -41,8 +41,9 @@ message Bytes {
 You can use this in the following way:
 
 ```go
-// Call our streaming endpoint
-resp, err := client.Stream(context.Background())
+// On the client side, call our streaming endpoint with a context that conn.Close can cancel.
+ctx, cancel := context.WithCancel(context.Background())
+resp, err := client.Stream(ctx)
 
 // We need to create a callback so the conn knows how to decode/encode
 // arbitrary byte slices for our proto type.
@@ -52,12 +53,33 @@ fieldFunc := func(msg proto.Message) *[]byte {
 
 // Wrap our conn around the response.
 conn := &grpc_net_conn.Conn{
-	Stream: resp,
-	Request: &example.Bytes{},
+	Stream:   resp,
+	Request:  &example.Bytes{},
 	Response: &example.Bytes{},
-	Encode: SimpleEncoder(fieldFunc),
-	Decode: SimpleDecoder(fieldFunc),
+	Encode:   grpc_net_conn.SimpleEncoder(fieldFunc),
+	Decode:   grpc_net_conn.SimpleDecoder(fieldFunc),
+	Cancel:   cancel,
 }
 
 // conn implements net.Conn so use it as you would!
+```
+
+On the server side, wrap the received stream in a `Conn` as well. A server stream only ends
+when its RPC handler returns, so return once `conn.Done()` is closed:
+
+```go
+func (s *server) Stream(stream example.ExampleService_StreamServer) error {
+	conn := &grpc_net_conn.Conn{
+		Stream:   stream,
+		Request:  &example.Bytes{},
+		Response: &example.Bytes{},
+		Encode:   grpc_net_conn.SimpleEncoder(fieldFunc),
+		Decode:   grpc_net_conn.SimpleDecoder(fieldFunc),
+	}
+	// conn implements net.Conn so use it as you would!
+	go handle(conn)
+
+	<-conn.Done()
+	return nil
+}
 ```

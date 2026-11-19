@@ -5,9 +5,9 @@ import (
 	"net"
 	"testing"
 
-	"google.golang.org/protobuf/proto"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/unlabs-dev/go-grpc-net-conn/testproto"
 )
